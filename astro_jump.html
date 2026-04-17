@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Astro Jump</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #05060f;
+    color: #e6f2ff;
+    font-family: 'Courier New', monospace;
+    height: 100%;
+    overflow: hidden;
+  }
+  .wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 16px;
+    box-sizing: border-box;
+  }
+  h1 {
+    margin: 0 0 6px 0;
+    letter-spacing: 4px;
+    font-size: 26px;
+    color: #ffe066;
+    text-shadow: 0 0 8px rgba(255, 224, 102, 0.6);
+  }
+  .hint {
+    margin: 0 0 10px 0;
+    font-size: 13px;
+    color: #9bd6ff;
+    letter-spacing: 1px;
+  }
+  .stage {
+    position: relative;
+    width: 640px;
+    max-width: 100%;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    background: #070820;
+    border: 2px solid #1d2b5c;
+    image-rendering: pixelated;
+    box-shadow: 0 0 24px rgba(40, 80, 200, 0.35);
+  }
+  .status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+    font-size: 13px;
+    color: #bcd9ff;
+  }
+  #state { color: #7fffd4; }
+  #state.over { color: #ff6b6b; }
+  #state.win { color: #ffe066; }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(5, 6, 20, 0.78);
+    color: #fff;
+    text-align: center;
+  }
+  .overlay.show { display: flex; }
+  .overlay h2 {
+    margin: 0 0 12px 0;
+    font-size: 28px;
+    letter-spacing: 3px;
+  }
+  .overlay.win h2 { color: #ffe066; text-shadow: 0 0 12px rgba(255, 224, 102, 0.7); }
+  .overlay.over h2 { color: #ff6b6b; text-shadow: 0 0 12px rgba(255, 107, 107, 0.6); }
+  button {
+    background: #1a2a6c;
+    color: #fff;
+    border: 2px solid #5a8dff;
+    padding: 10px 22px;
+    font-family: inherit;
+    font-size: 14px;
+    letter-spacing: 2px;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.05s;
+  }
+  button:hover { background: #2a3f92; }
+  button:active { transform: translateY(1px); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>ASTRO JUMP</h1>
+    <p class="hint">Arrow Keys / WASD to move &nbsp;&bull;&nbsp; SPACE to jump</p>
+    <div class="stage">
+      <canvas id="game" width="640" height="420"></canvas>
+      <div id="overlay" class="overlay">
+        <h2 id="overlayTitle">GAME OVER</h2>
+        <button id="restart">RESTART</button>
+      </div>
+    </div>
+    <div class="status">
+      <span>Status: <span id="state">PLAYING</span></span>
+      <span>Score: <span id="score">0</span></span>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+
+  const stateEl = document.getElementById('state');
+  const scoreEl = document.getElementById('score');
+  const overlay = document.getElementById('overlay');
+  const overlayTitle = document.getElementById('overlayTitle');
+  const restartBtn = document.getElementById('restart');
+
+  // Lunar physics: low gravity, floaty hang-time, gentle falls.
+  const GRAVITY = 0.16;          // base pull — low for moon feel
+  const APEX_GRAVITY = 0.08;     // extra-soft pull near the top of the arc
+  const FALL_GRAVITY = 0.22;     // slightly stronger on the way down so landings feel intentional
+  const MOVE_SPEED = 3.0;
+  const GROUND_ACCEL = 0.6;      // smooth ground acceleration
+  const AIR_ACCEL = 0.28;        // gentle air drift
+  const JUMP_VELOCITY = -6.8;
+  const JUMP_CUT_MULT = 0.7;     // smoother cut (was 0.5 — less jarring)
+  const MAX_FALL = 5.5;
+  // Coyote + jump-buffer make jumps feel generous.
+  const COYOTE_FRAMES = 12;
+  const JUMP_BUFFER_FRAMES = 12;
+
+  // Level layout: compact, single screen.
+  const platforms = [
+    { x: 0,   y: 390, w: 160, h: 30, color: '#18d2ff' }, // ground-left
+    { x: 200, y: 340, w: 90,  h: 14, color: '#ff4fd8' },
+    { x: 330, y: 300, w: 80,  h: 14, color: '#ffe066' },
+    { x: 460, y: 360, w: 180, h: 30, color: '#18d2ff' }, // ground-right
+    { x: 80,  y: 250, w: 100, h: 14, color: '#4cff88' },
+    { x: 230, y: 200, w: 90,  h: 14, color: '#ff4fd8' },
+    { x: 380, y: 160, w: 90,  h: 14, color: '#ffe066' },
+    { x: 520, y: 110, w: 100, h: 14, color: '#4cff88' }, // portal platform
+  ];
+
+  // Portal perches on the top-right platform.
+  const portal = { x: 560, y: 70, w: 28, h: 36 };
+
+  // Asteroids patrol specific platforms.
+  function makeAsteroid(plat, speed, radius) {
+    return {
+      platIndex: platforms.indexOf(plat),
+      x: plat.x + plat.w / 2,
+      y: plat.y - radius,
+      r: radius,
+      vx: speed,
+    };
+  }
+
+  let player, asteroids, keys, score, gameState, portalPulse, stars;
+
+  function resetGame() {
+    player = {
+      x: 30, y: 340,
+      w: 14, h: 18,
+      vx: 0, vy: 0,
+      onGround: false,
+      coyote: 0,
+      jumpBuffer: 0,
+      facing: 1,
+      blink: 0,
+    };
+    asteroids = [
+      makeAsteroid(platforms[0], 1.2, 9),
+      makeAsteroid(platforms[3], 1.5, 9),
+      makeAsteroid(platforms[4], 1.1, 8),
+    ];
+    keys = {};
+    score = 0;
+    gameState = 'playing';
+    portalPulse = 0;
+    stateEl.textContent = 'PLAYING';
+    stateEl.className = '';
+    scoreEl.textContent = '0';
+    overlay.classList.remove('show', 'win', 'over');
+    // Regenerate starfield each run for variety.
+    stars = Array.from({ length: 70 }, () => ({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      s: Math.random() * 1.6 + 0.3,
+      tw: Math.random() * Math.PI * 2,
+    }));
+  }
+
+  // Keyboard input.
+  window.addEventListener('keydown', (e) => {
+    if (['ArrowLeft','ArrowRight','ArrowUp',' ','Space'].includes(e.key) || e.code === 'Space') {
+      e.preventDefault();
+    }
+    keys[e.key.toLowerCase()] = true;
+    if (e.code === 'Space') keys[' '] = true;
+  });
+  window.addEventListener('keyup', (e) => {
+    keys[e.key.toLowerCase()] = false;
+    if (e.code === 'Space') keys[' '] = false;
+  });
+
+  restartBtn.addEventListener('click', resetGame);
+
+  function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+  }
+
+  function circleRectHit(cx, cy, cr, rx, ry, rw, rh) {
+    const nx = Math.max(rx, Math.min(cx, rx + rw));
+    const ny = Math.max(ry, Math.min(cy, ry + rh));
+    const dx = cx - nx, dy = cy - ny;
+    return dx * dx + dy * dy <= cr * cr;
+  }
+
+  function updatePlayer() {
+    // Horizontal input (arrows or WASD).
+    const left = keys['arrowleft'] || keys['a'];
+    const right = keys['arrowright'] || keys['d'];
+    const jumpHeld = keys[' '] || keys['arrowup'] || keys['w'];
+
+    // Smoothly accelerate horizontally for a floaty lunar glide instead of snap.
+    let targetVx = 0;
+    if (left && !right) { targetVx = -MOVE_SPEED; player.facing = -1; }
+    else if (right && !left) { targetVx = MOVE_SPEED; player.facing = 1; }
+    const accel = player.onGround ? GROUND_ACCEL : AIR_ACCEL;
+    if (player.vx < targetVx) player.vx = Math.min(targetVx, player.vx + accel);
+    else if (player.vx > targetVx) player.vx = Math.max(targetVx, player.vx - accel);
+
+    // Jump buffer: remember a recent press so a slightly-early tap still works.
+    if (jumpHeld) player.jumpBuffer = JUMP_BUFFER_FRAMES;
+    else if (player.jumpBuffer > 0) player.jumpBuffer--;
+
+    if (player.jumpBuffer > 0 && player.coyote > 0) {
+      player.vy = JUMP_VELOCITY;
+      player.onGround = false;
+      player.coyote = 0;
+      player.jumpBuffer = 0;
+      player.jumpHeld = true;
+    }
+
+    // Variable jump height: smoothly decay upward velocity while the button is released,
+    // instead of chopping it abruptly — gives a smooth arc instead of a cut.
+    if (!jumpHeld && player.vy < 0 && player.jumpHeld) {
+      player.vy *= JUMP_CUT_MULT;
+      player.jumpHeld = false;
+    }
+    if (!jumpHeld) player.jumpHeld = false;
+
+    // Smoothly ramp gravity across the arc: soft at apex, stronger on descent.
+    let g;
+    if (player.vy < -1.5) g = GRAVITY;             // rising fast
+    else if (player.vy < 1.5) g = APEX_GRAVITY;    // near apex — float
+    else g = FALL_GRAVITY;                         // descending
+    player.vy += g;
+    if (player.vy > MAX_FALL) player.vy = MAX_FALL;
+
+    // Horizontal move + world bounds.
+    player.x += player.vx;
+    if (player.x < 0) player.x = 0;
+    if (player.x + player.w > W) player.x = W - player.w;
+
+    // Vertical move with one-way platform collision (top only).
+    const prevBottom = player.y + player.h - player.vy;
+    player.y += player.vy;
+
+    player.onGround = false;
+    if (player.vy >= 0) {
+      for (const p of platforms) {
+        const landing = player.y + player.h;
+        if (
+          player.x + player.w > p.x && player.x < p.x + p.w &&
+          prevBottom <= p.y + 0.1 && landing >= p.y && landing <= p.y + p.h + 6
+        ) {
+          player.y = p.y - player.h;
+          player.vy = 0;
+          player.onGround = true;
+          break;
+        }
+      }
+    }
+
+    if (player.onGround) player.coyote = COYOTE_FRAMES;
+    else if (player.coyote > 0) player.coyote--;
+
+    // Fell off the world -> game over.
+    if (player.y > H + 40) triggerGameOver();
+
+    player.blink = (player.blink + 1) % 180;
+  }
+
+  function updateAsteroids() {
+    for (const a of asteroids) {
+      const p = platforms[a.platIndex];
+      a.x += a.vx;
+      // Bounce at platform edges, keeping a small margin.
+      if (a.x - a.r < p.x + 2) { a.x = p.x + 2 + a.r; a.vx *= -1; }
+      if (a.x + a.r > p.x + p.w - 2) { a.x = p.x + p.w - 2 - a.r; a.vx *= -1; }
+
+      if (circleRectHit(a.x, a.y, a.r, player.x, player.y, player.w, player.h)) {
+        triggerGameOver();
+      }
+    }
+  }
+
+  function checkPortal() {
+    if (rectsOverlap(player.x, player.y, player.w, player.h, portal.x, portal.y, portal.w, portal.h)) {
+      triggerWin();
+    }
+  }
+
+  function triggerGameOver() {
+    if (gameState !== 'playing') return;
+    gameState = 'over';
+    stateEl.textContent = 'GAME OVER';
+    stateEl.className = 'over';
+    overlayTitle.textContent = 'GAME OVER';
+    overlay.classList.add('show', 'over');
+  }
+
+  function triggerWin() {
+    if (gameState !== 'playing') return;
+    gameState = 'win';
+    stateEl.textContent = 'YOU WIN!';
+    stateEl.className = 'win';
+    overlayTitle.textContent = 'YOU WIN!';
+    overlay.classList.add('show', 'win');
+  }
+
+  // Drawing helpers.
+  function drawStars() {
+    for (const s of stars) {
+      s.tw += 0.04;
+      const alpha = 0.5 + Math.sin(s.tw) * 0.4;
+      ctx.fillStyle = `rgba(200, 220, 255, ${alpha.toFixed(3)})`;
+      ctx.fillRect(s.x, s.y, s.s, s.s);
+    }
+  }
+
+  function drawPlatform(p) {
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    // Subtle darker underside for depth.
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.fillRect(p.x, p.y + p.h - 3, p.w, 3);
+    // Top highlight.
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.fillRect(p.x, p.y, p.w, 2);
+  }
+
+  function drawPlayer() {
+    const { x, y, w, h, facing } = player;
+    // Body (suit).
+    ctx.fillStyle = '#f4faff';
+    ctx.fillRect(x, y + 6, w, h - 6);
+    // Helmet.
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(x + 1, y, w - 2, 8);
+    // Visor.
+    ctx.fillStyle = '#18d2ff';
+    ctx.fillRect(x + 3, y + 2, w - 6, 4);
+    // Visor shine.
+    ctx.fillStyle = '#eafcff';
+    ctx.fillRect(x + (facing > 0 ? w - 6 : 3), y + 3, 2, 1);
+    // Chest light.
+    ctx.fillStyle = player.blink < 90 ? '#ff4fd8' : '#ffe066';
+    ctx.fillRect(x + w / 2 - 1, y + 10, 2, 2);
+    // Legs.
+    ctx.fillStyle = '#c9d6e6';
+    ctx.fillRect(x + 2, y + h - 3, 3, 3);
+    ctx.fillRect(x + w - 5, y + h - 3, 3, 3);
+  }
+
+  function drawAsteroid(a) {
+    // Glow.
+    const glow = ctx.createRadialGradient(a.x, a.y, 1, a.x, a.y, a.r + 6);
+    glow.addColorStop(0, 'rgba(255, 150, 60, 0.55)');
+    glow.addColorStop(1, 'rgba(255, 150, 60, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(a.x, a.y, a.r + 6, 0, Math.PI * 2);
+    ctx.fill();
+    // Body.
+    ctx.fillStyle = '#ff8a3d';
+    ctx.beginPath();
+    ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2);
+    ctx.fill();
+    // Darker craters.
+    ctx.fillStyle = '#b84a14';
+    ctx.beginPath();
+    ctx.arc(a.x - a.r * 0.35, a.y - a.r * 0.2, a.r * 0.25, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(a.x + a.r * 0.3, a.y + a.r * 0.25, a.r * 0.18, 0, Math.PI * 2);
+    ctx.fill();
+    // Highlight.
+    ctx.fillStyle = '#ffd7a8';
+    ctx.beginPath();
+    ctx.arc(a.x - a.r * 0.45, a.y - a.r * 0.45, a.r * 0.18, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawPortal() {
+    portalPulse += 0.08;
+    const pulse = 0.5 + Math.sin(portalPulse) * 0.5;
+    const cx = portal.x + portal.w / 2;
+    const cy = portal.y + portal.h / 2;
+    const gradient = ctx.createRadialGradient(cx, cy, 2, cx, cy, 40);
+    gradient.addColorStop(0, `rgba(255, 240, 120, ${0.7 + pulse * 0.3})`);
+    gradient.addColorStop(1, 'rgba(255, 240, 120, 0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(portal.x - 20, portal.y - 20, portal.w + 40, portal.h + 40);
+
+    // Core square.
+    ctx.fillStyle = '#fff6b0';
+    ctx.fillRect(portal.x, portal.y, portal.w, portal.h);
+    ctx.fillStyle = '#ffe066';
+    ctx.fillRect(portal.x + 3, portal.y + 3, portal.w - 6, portal.h - 6);
+    ctx.fillStyle = '#fffbe0';
+    ctx.fillRect(portal.x + 8, portal.y + 6, portal.w - 16, 4);
+  }
+
+  function render() {
+    // Background.
+    ctx.fillStyle = '#070820';
+    ctx.fillRect(0, 0, W, H);
+    drawStars();
+
+    // Distant planet accent.
+    ctx.fillStyle = 'rgba(80, 110, 220, 0.35)';
+    ctx.beginPath();
+    ctx.arc(90, 90, 36, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(120, 160, 255, 0.25)';
+    ctx.beginPath();
+    ctx.arc(82, 82, 24, 0, Math.PI * 2);
+    ctx.fill();
+
+    platforms.forEach(drawPlatform);
+    drawPortal();
+    asteroids.forEach(drawAsteroid);
+    drawPlayer();
+  }
+
+  function loop() {
+    if (gameState === 'playing') {
+      updatePlayer();
+      updateAsteroids();
+      checkPortal();
+      // Tiny score ticks up so players feel progress; capped on win.
+      score += 1;
+      scoreEl.textContent = Math.floor(score / 6).toString();
+    }
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  resetGame();
+  loop();
+})();
+</script>
+</body>
+</html>
