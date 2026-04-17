@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Lunar Drop</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #05060d;
+    color: #e8e8f0;
+    font-family: "Courier New", monospace;
+    overflow: hidden;
+    height: 100%;
+  }
+  #wrap {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    background: #05060d;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    box-shadow: 0 0 40px rgba(120, 180, 255, 0.15);
+    border: 1px solid #1a1e2e;
+  }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+  }
+  .panel {
+    pointer-events: auto;
+    background: rgba(8, 10, 20, 0.92);
+    border: 1px solid #2a3350;
+    padding: 28px 36px;
+    text-align: center;
+    min-width: 320px;
+    box-shadow: 0 0 30px rgba(80, 140, 220, 0.2);
+  }
+  .panel h1 {
+    margin: 0 0 6px;
+    font-size: 28px;
+    letter-spacing: 6px;
+    color: #e4ecff;
+  }
+  .panel h2 {
+    margin: 0 0 16px;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #7a88b0;
+    font-weight: normal;
+  }
+  .panel p {
+    margin: 8px 0;
+    font-size: 13px;
+    color: #a8b4d0;
+    line-height: 1.6;
+  }
+  .panel .stats {
+    margin: 14px 0;
+    padding: 10px;
+    border-top: 1px solid #1e2540;
+    border-bottom: 1px solid #1e2540;
+    color: #c8d4f0;
+    font-size: 13px;
+  }
+  .panel button {
+    margin-top: 14px;
+    background: #1a2240;
+    color: #e8ecff;
+    border: 1px solid #3a4878;
+    padding: 10px 24px;
+    font-family: inherit;
+    font-size: 13px;
+    letter-spacing: 3px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .panel button:hover {
+    background: #2a3560;
+    border-color: #5a70b0;
+  }
+  .hidden { display: none !important; }
+  .key {
+    display: inline-block;
+    padding: 2px 8px;
+    border: 1px solid #3a4878;
+    background: #141a30;
+    color: #e4ecff;
+    margin: 0 2px;
+    font-size: 11px;
+  }
+  .result-good { color: #7aff9a; }
+  .result-bad { color: #ff7a8a; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="480" height="720"></canvas>
+  <div id="overlay">
+    <div id="startPanel" class="panel">
+      <h1>LUNAR DROP</h1>
+      <h2>— descend with care —</h2>
+      <p>Land your ship softly on a flat pad.<br/>
+      Watch your fuel. Mind your speed.</p>
+      <p style="margin-top:14px">
+        <span class="key">←</span><span class="key">→</span> or <span class="key">A</span><span class="key">D</span> — steer<br/>
+        <span class="key">↑</span> or <span class="key">W</span> or <span class="key">Space</span> — thrust<br/>
+        <span class="key">R</span> — restart
+      </p>
+      <button id="startBtn">LAUNCH</button>
+    </div>
+    <div id="endPanel" class="panel hidden">
+      <h1 id="endTitle">LANDED</h1>
+      <h2 id="endSub">nominal touchdown</h2>
+      <div class="stats" id="endStats"></div>
+      <p style="font-size:12px;color:#7a88b0">Total Score: <span id="endScore" style="color:#e4ecff">0</span></p>
+      <button id="restartBtn">RETRY</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+
+  const W = canvas.width;
+  const H = canvas.height;
+
+  const GRAVITY = 0.045;
+  const THRUST = 0.11;
+  const LATERAL = 0.055;
+  const DRAG = 0.992;
+  const FUEL_BURN = 0.35;
+  const SAFE_LAND_VY = 1.3;
+  const SAFE_LAND_VX = 0.8;
+
+  const state = {
+    mode: 'menu',
+    ship: null,
+    stars: [],
+    terrain: [],
+    pads: [],
+    particles: [],
+    fuel: 100,
+    score: 0,
+    totalLanded: 0,
+    keys: {},
+    shake: 0,
+    cameraY: 0,
+    tick: 0,
+    result: null,
+  };
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function randi(a, b) { return Math.floor(rand(a, b)); }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+  function makeStars() {
+    state.stars = [];
+    for (let i = 0; i < 140; i++) {
+      state.stars.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        b: Math.random(),
+        s: Math.random() < 0.1 ? 2 : 1,
+        twinkle: Math.random() * Math.PI * 2,
+      });
+    }
+  }
+
+  function makeTerrain() {
+    const groundY = H - 120;
+    const seg = 8;
+    const points = [];
+    let x = 0;
+    let y = groundY;
+    while (x <= W) {
+      points.push({ x, y });
+      x += seg;
+      y = groundY + rand(-20, 20);
+    }
+    for (let i = 1; i < points.length - 1; i++) {
+      points[i].y = (points[i - 1].y + points[i].y + points[i + 1].y) / 3;
+    }
+
+    const pads = [];
+    const padCount = randi(2, 4);
+    const used = new Set();
+    for (let k = 0; k < padCount; k++) {
+      let attempts = 0;
+      while (attempts++ < 20) {
+        const startI = randi(4, points.length - 10);
+        const widthI = randi(4, 7);
+        let ok = true;
+        for (let j = startI - 1; j <= startI + widthI + 1; j++) {
+          if (used.has(j)) { ok = false; break; }
+        }
+        if (!ok) continue;
+        const baseY = points[startI].y + rand(-5, 5);
+        for (let j = startI; j <= startI + widthI; j++) {
+          points[j].y = baseY;
+          used.add(j);
+        }
+        pads.push({
+          x1: points[startI].x,
+          x2: points[startI + widthI].x,
+          y: baseY,
+          bonus: widthI <= 4 ? 3 : widthI <= 5 ? 2 : 1,
+          hit: false,
+        });
+        break;
+      }
+    }
+
+    const rocks = [];
+    for (let i = 0; i < 18; i++) {
+      const px = rand(10, W - 10);
+      let onPad = false;
+      for (const p of pads) {
+        if (px >= p.x1 - 10 && px <= p.x2 + 10) { onPad = true; break; }
+      }
+      if (onPad) continue;
+      const ti = Math.floor(px / seg);
+      const py = points[clamp(ti, 0, points.length - 1)].y;
+      rocks.push({
+        x: px,
+        y: py - rand(3, 8),
+        r: rand(3, 7),
+      });
+    }
+
+    state.terrain = points;
+    state.pads = pads;
+    state.rocks = rocks;
+  }
+
+  function resetShip() {
+    state.ship = {
+      x: W / 2,
+      y: 60,
+      vx: rand(-0.4, 0.4),
+      vy: 0,
+      angle: 0,
+      alive: true,
+      thrusting: false,
+      turningL: false,
+      turningR: false,
+    };
+  }
+
+  function startGame() {
+    state.mode = 'play';
+    state.fuel = 100;
+    state.particles = [];
+    state.shake = 0;
+    state.tick = 0;
+    state.result = null;
+    makeStars();
+    makeTerrain();
+    resetShip();
+    hideOverlays();
+  }
+
+  function hideOverlays() {
+    document.getElementById('startPanel').classList.add('hidden');
+    document.getElementById('endPanel').classList.add('hidden');
+  }
+
+  function showEnd(result) {
+    state.mode = 'end';
+    state.result = result;
+    const title = document.getElementById('endTitle');
+    const sub = document.getElementById('endSub');
+    const stats = document.getElementById('endStats');
+    const scoreEl = document.getElementById('endScore');
+
+    if (result.type === 'landed') {
+      title.textContent = 'TOUCHDOWN';
+      title.className = 'result-good';
+      sub.textContent = result.perfect ? '— flawless —' : '— nominal landing —';
+      stats.innerHTML = `
+        Landing speed: <b>${result.speed.toFixed(2)}</b><br/>
+        Pad bonus: <b>x${result.bonus}</b><br/>
+        Fuel saved: <b>${Math.round(result.fuelLeft)}%</b><br/>
+        Points earned: <b>+${result.points}</b>
+      `;
+    } else {
+      title.textContent = result.type === 'crashed' ? 'CRASHED' : 'NO FUEL';
+      title.className = 'result-bad';
+      sub.textContent = result.reason || '— mission failed —';
+      stats.innerHTML = `
+        Ships landed: <b>${state.totalLanded}</b><br/>
+        Final altitude: <b>${Math.round(result.alt || 0)} m</b>
+      `;
+    }
+    scoreEl.textContent = state.score;
+    document.getElementById('endPanel').classList.remove('hidden');
+  }
+
+  window.addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    state.keys[k] = true;
+    if (k === ' ') e.preventDefault();
+    if (k === 'r') {
+      if (state.mode !== 'menu') startGame();
+    }
+  });
+  window.addEventListener('keyup', e => {
+    state.keys[e.key.toLowerCase()] = false;
+  });
+
+  document.getElementById('startBtn').addEventListener('click', startGame);
+  document.getElementById('restartBtn').addEventListener('click', startGame);
+
+  function emitParticle(x, y, vx, vy, life, color, size = 2) {
+    state.particles.push({ x, y, vx, vy, life, maxLife: life, color, size });
+  }
+
+  function updateShip() {
+    const s = state.ship;
+    if (!s.alive) return;
+
+    const k = state.keys;
+    const left = k['arrowleft'] || k['a'];
+    const right = k['arrowright'] || k['d'];
+    const up = k['arrowup'] || k['w'] || k[' '];
+
+    s.turningL = left && !right;
+    s.turningR = right && !left;
+    s.thrusting = up && state.fuel > 0;
+
+    if (s.turningL) s.vx -= LATERAL;
+    if (s.turningR) s.vx += LATERAL;
+
+    if (s.thrusting) {
+      s.vy -= THRUST;
+      state.fuel -= FUEL_BURN;
+      if (state.fuel < 0) state.fuel = 0;
+      for (let i = 0; i < 2; i++) {
+        emitParticle(
+          s.x + rand(-2, 2),
+          s.y + 8,
+          rand(-0.3, 0.3) - s.vx * 0.2,
+          rand(1, 2.5),
+          randi(14, 24),
+          i === 0 ? '#ffd27a' : '#ff8a4a',
+          randi(2, 3)
+        );
+      }
+    }
+
+    s.vy += GRAVITY;
+    s.vx *= DRAG;
+    s.x += s.vx;
+    s.y += s.vy;
+
+    const targetAngle = clamp(s.vx * 0.12, -0.5, 0.5);
+    s.angle += (targetAngle - s.angle) * 0.15;
+
+    if (s.x < 8) { s.x = 8; s.vx = Math.abs(s.vx) * 0.3; }
+    if (s.x > W - 8) { s.x = W - 8; s.vx = -Math.abs(s.vx) * 0.3; }
+
+    checkCollision();
+
+    if (state.fuel <= 0 && !s.thrusting) {
+      if (s.y > H - 60 && Math.abs(s.vy) < 0.2) {
+        // graceful near-ground
+      }
+    }
+  }
+
+  function terrainYAt(x) {
+    const pts = state.terrain;
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (x >= pts[i].x && x <= pts[i + 1].x) {
+        const t = (x - pts[i].x) / (pts[i + 1].x - pts[i].x);
+        return pts[i].y + (pts[i + 1].y - pts[i].y) * t;
+      }
+    }
+    return H;
+  }
+
+  function padAt(x) {
+    for (const p of state.pads) {
+      if (x >= p.x1 && x <= p.x2) return p;
+    }
+    return null;
+  }
+
+  function checkCollision() {
+    const s = state.ship;
+    const gy = terrainYAt(s.x);
+    const shipBottom = s.y + 8;
+
+    for (const rock of state.rocks) {
+      const dx = s.x - rock.x;
+      const dy = (s.y + 4) - rock.y;
+      if (dx * dx + dy * dy < (rock.r + 6) * (rock.r + 6)) {
+        crash('impact with debris');
+        return;
+      }
+    }
+
+    if (shipBottom >= gy) {
+      const pad = padAt(s.x);
+      const speed = Math.hypot(s.vx, s.vy);
+      const flatEnough = Math.abs(s.angle) < 0.25;
+      if (pad && Math.abs(s.vy) < SAFE_LAND_VY && Math.abs(s.vx) < SAFE_LAND_VX && flatEnough) {
+        land(pad, speed);
+      } else {
+        crash(pad ? 'too fast' : 'rough terrain');
+      }
+    }
+  }
+
+  function land(pad, speed) {
+    const s = state.ship;
+    s.y = pad.y - 8;
+    s.vx = 0; s.vy = 0;
+    s.alive = false;
+    state.totalLanded++;
+    const perfect = speed < 0.5;
+    const base = 100;
+    const speedBonus = Math.round(Math.max(0, (SAFE_LAND_VY - Math.abs(s.vy)) * 40));
+    const fuelBonus = Math.round(state.fuel * 0.5);
+    const padBonus = pad.bonus;
+    const points = (base + speedBonus + fuelBonus) * padBonus + (perfect ? 100 : 0);
+    state.score += points;
+    setTimeout(() => {
+      showEnd({
+        type: 'landed',
+        speed,
+        bonus: padBonus,
+        fuelLeft: state.fuel,
+        points,
+        perfect,
+      });
+    }, 600);
+  }
+
+  function crash(reason) {
+    const s = state.ship;
+    if (!s.alive) return;
+    s.alive = false;
+    state.shake = 14;
+    for (let i = 0; i < 40; i++) {
+      emitParticle(
+        s.x, s.y,
+        rand(-3, 3), rand(-4, 1),
+        randi(30, 60),
+        Math.random() < 0.5 ? '#ff7a5a' : '#ffdd7a',
+        randi(2, 4)
+      );
+    }
+    for (let i = 0; i < 20; i++) {
+      emitParticle(
+        s.x, s.y,
+        rand(-2, 2), rand(-2, 1),
+        randi(40, 80),
+        '#555566',
+        randi(2, 3)
+      );
+    }
+    setTimeout(() => {
+      showEnd({
+        type: 'crashed',
+        reason,
+        alt: Math.max(0, terrainYAt(s.x) - s.y),
+      });
+    }, 900);
+  }
+
+  function updateParticles() {
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      const p = state.particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.04;
+      p.life--;
+      if (p.life <= 0) state.particles.splice(i, 1);
+    }
+  }
+
+  function drawStars() {
+    for (const s of state.stars) {
+      const tw = 0.6 + Math.sin(state.tick * 0.05 + s.twinkle) * 0.4;
+      const a = s.b * tw;
+      ctx.fillStyle = `rgba(${200 + s.b * 55 | 0}, ${210 + s.b * 45 | 0}, 255, ${a})`;
+      ctx.fillRect(s.x | 0, s.y | 0, s.s, s.s);
+    }
+  }
+
+  function drawTerrain() {
+    const pts = state.terrain;
+
+    ctx.fillStyle = '#1a1a28';
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (const p of pts) ctx.lineTo(p.x, p.y + 2);
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = '#2a2a40';
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (const p of pts) ctx.lineTo(p.x, p.y);
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = '#6a7098';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
+    }
+    ctx.stroke();
+
+    for (const pad of state.pads) {
+      const col = pad.bonus === 3 ? '#7affc0' : pad.bonus === 2 ? '#7abfff' : '#c8c8e0';
+      ctx.fillStyle = col;
+      ctx.fillRect(pad.x1, pad.y - 2, pad.x2 - pad.x1, 4);
+      ctx.fillStyle = col;
+      ctx.fillRect(pad.x1 - 2, pad.y - 8, 2, 8);
+      ctx.fillRect(pad.x2, pad.y - 8, 2, 8);
+      ctx.fillStyle = `${col}`;
+      ctx.font = '9px "Courier New"';
+      ctx.textAlign = 'center';
+      ctx.fillText(`x${pad.bonus}`, (pad.x1 + pad.x2) / 2, pad.y - 12);
+    }
+
+    for (const rock of state.rocks) {
+      ctx.fillStyle = '#3a3a50';
+      ctx.beginPath();
+      ctx.arc(rock.x, rock.y, rock.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#5a5a78';
+      ctx.beginPath();
+      ctx.arc(rock.x - rock.r * 0.3, rock.y - rock.r * 0.3, rock.r * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawShip() {
+    const s = state.ship;
+    if (!s.alive && state.mode === 'end' && state.result && state.result.type !== 'landed') return;
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    ctx.rotate(s.angle);
+
+    ctx.fillStyle = '#c8d4f0';
+    ctx.fillRect(-3, -6, 6, 8);
+    ctx.fillStyle = '#8a94b8';
+    ctx.fillRect(-5, -2, 2, 6);
+    ctx.fillRect(3, -2, 2, 6);
+    ctx.fillStyle = '#e4ecff';
+    ctx.fillRect(-2, -8, 4, 3);
+    ctx.fillStyle = '#6aa8ff';
+    ctx.fillRect(-1, -5, 2, 2);
+    ctx.fillStyle = '#2a3050';
+    ctx.fillRect(-3, 2, 6, 1);
+    ctx.fillStyle = '#5a6488';
+    ctx.fillRect(-4, 2, 2, 4);
+    ctx.fillRect(2, 2, 2, 4);
+
+    if (s.thrusting) {
+      ctx.fillStyle = '#ffdd7a';
+      ctx.fillRect(-2, 6, 4, 3 + Math.random() * 2);
+      ctx.fillStyle = '#ff8a4a';
+      ctx.fillRect(-1, 6, 2, 2 + Math.random() * 2);
+    }
+    if (s.turningL) {
+      ctx.fillStyle = '#ffb08a';
+      ctx.fillRect(3, 0, 3, 1);
+    }
+    if (s.turningR) {
+      ctx.fillStyle = '#ffb08a';
+      ctx.fillRect(-6, 0, 3, 1);
+    }
+
+    ctx.restore();
+  }
+
+  function drawParticles() {
+    for (const p of state.particles) {
+      const a = p.life / p.maxLife;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x | 0, p.y | 0, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawHUD() {
+    const s = state.ship;
+    const gy = s ? terrainYAt(s.x) : H;
+    const alt = s ? Math.max(0, gy - s.y - 8) : 0;
+    const vy = s ? s.vy : 0;
+    const vx = s ? s.vx : 0;
+    const speed = Math.hypot(vx, vy);
+
+    ctx.fillStyle = 'rgba(8, 10, 20, 0.6)';
+    ctx.fillRect(8, 8, 180, 80);
+    ctx.strokeStyle = '#2a3350';
+    ctx.strokeRect(8, 8, 180, 80);
+
+    ctx.font = '10px "Courier New"';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#8a94b8';
+    ctx.fillText('FUEL', 16, 22);
+    ctx.fillText('ALT', 16, 38);
+    ctx.fillText('V-SPD', 16, 54);
+    ctx.fillText('H-SPD', 16, 70);
+    ctx.fillText('SCORE', 16, 86);
+
+    const fuelW = 110;
+    ctx.fillStyle = '#1a1e2e';
+    ctx.fillRect(60, 15, fuelW, 8);
+    const fpc = state.fuel / 100;
+    const fcol = fpc > 0.5 ? '#7aff9a' : fpc > 0.2 ? '#ffdd7a' : '#ff7a8a';
+    ctx.fillStyle = fcol;
+    ctx.fillRect(60, 15, fuelW * fpc, 8);
+    ctx.fillStyle = '#e4ecff';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${Math.round(state.fuel)}%`, 184, 22);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#e4ecff';
+    ctx.fillText(`${Math.round(alt)} m`, 184, 38);
+
+    const vyCol = Math.abs(vy) > SAFE_LAND_VY ? '#ff7a8a' : '#7aff9a';
+    ctx.fillStyle = vyCol;
+    ctx.fillText(`${vy.toFixed(2)}`, 184, 54);
+
+    const vxCol = Math.abs(vx) > SAFE_LAND_VX ? '#ff7a8a' : '#7aff9a';
+    ctx.fillStyle = vxCol;
+    ctx.fillText(`${vx.toFixed(2)}`, 184, 70);
+
+    ctx.fillStyle = '#e4ecff';
+    ctx.fillText(`${state.score}`, 184, 86);
+
+    if (alt < 120 && s && s.alive) {
+      const pad = padAt(s.x);
+      if (pad) {
+        const danger = Math.abs(vy) > SAFE_LAND_VY || Math.abs(vx) > SAFE_LAND_VX;
+        ctx.fillStyle = danger ? 'rgba(255, 122, 138, 0.9)' : 'rgba(122, 255, 154, 0.9)';
+        ctx.textAlign = 'center';
+        ctx.font = '11px "Courier New"';
+        ctx.fillText(danger ? 'TOO FAST' : 'SAFE ZONE', W / 2, 28);
+      }
+    }
+  }
+
+  function render() {
+    ctx.save();
+    if (state.shake > 0) {
+      ctx.translate(rand(-state.shake, state.shake), rand(-state.shake, state.shake));
+      state.shake *= 0.88;
+      if (state.shake < 0.3) state.shake = 0;
+    }
+
+    ctx.fillStyle = '#05060d';
+    ctx.fillRect(0, 0, W, H);
+
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, 'rgba(20, 20, 50, 0.3)');
+    grad.addColorStop(1, 'rgba(5, 5, 15, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    drawStars();
+    drawTerrain();
+    drawParticles();
+    if (state.ship) drawShip();
+    drawHUD();
+
+    ctx.restore();
+  }
+
+  let lastTime = performance.now();
+  let acc = 0;
+  const STEP = 1000 / 60;
+
+  function loop(t) {
+    const dt = Math.min(100, t - lastTime);
+    lastTime = t;
+    acc += dt;
+    while (acc >= STEP) {
+      if (state.mode === 'play') {
+        state.tick++;
+        updateShip();
+      }
+      updateParticles();
+      acc -= STEP;
+    }
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  makeStars();
+  makeTerrain();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
